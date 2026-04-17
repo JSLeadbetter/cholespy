@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18...3.22)
 
-project(cholespy LANGUAGES CXX C VERSION "1.0.0")
+project(cholespy LANGUAGES CXX C VERSION "2.2.2")
 
 # Nanobind setup from https://github.com/wjakob/nanobind_example/blob/master/CMakeLists.txt
 if (NOT SKBUILD)
@@ -45,10 +45,18 @@ elseif (MSVC)
   find_package(Python)
 endif()
 
+# Determine the Development component based on OS
 if (UNIX AND NOT APPLE)
-  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+  set(_Python_Development_COMPONENT Development.Module)
 else()
-  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+  set(_Python_Development_COMPONENT Development)
+endif()
+
+# Include SABIModule for stable ABI support when available (set by scikit-build-core)
+if (SKBUILD_SABI_COMPONENT)
+  find_package(Python COMPONENTS Interpreter ${_Python_Development_COMPONENT} ${SKBUILD_SABI_COMPONENT} REQUIRED)
+else()
+  find_package(Python COMPONENTS Interpreter ${_Python_Development_COMPONENT} REQUIRED)
 endif()
 
 # Run `nanobind.cmake_dir()` from Python to detect install location

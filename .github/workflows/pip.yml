@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [windows-latest, macos-latest, ubuntu-latest]
-        python-version: ["3.8", "3.11"]
+        python-version: ["3.11", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -25,6 +25,10 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+
+    - name: Install BLAS and LAPACK
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y liblapack-dev
 
     - name: Set min macOS version
       if: runner.os == 'macOS'
