@@ -234,8 +234,10 @@ void CholeskySolver<Float>::factorize(int *col_ptr, int *rows, double *data) {
     }
     A_colptr[m_n] = m_nnz;
 
-    // Compute the Cholesky factorization
+    // Compute the Cholesky factorization, 
     m_factor = cholmod_analyze(A, &m_common);
+    
+    // Numerical factorisation.
     cholmod_factorize(A, m_factor, &m_common);
 
     // The previous call sets this flag if it failed
@@ -290,11 +292,8 @@ void CholeskySolver<Float>::factorize(int *col_ptr, int *rows, double *data) {
 
     cholmod_free_sparse(&A, &m_common);
 
-    // The context and factor will be needed for solving on the CPU, so only free them if we solve on the GPU
-    if (!m_cpu) {
-        cholmod_free_factor(&m_factor, &m_common);
-        cholmod_finish(&m_common);
-    }
+    // m_factor and m_common are kept alive (both CPU and GPU paths) so that
+    // refactorize() can call cholmod_factorize again and reuse the symbolic part.
 }
 
 template <typename Float>
@@ -464,12 +463,115 @@ void CholeskySolver<Float>::solve_cpu(int n_rhs, Float *b, Float *x) {
 }
 
 template <typename Float>
+void CholeskySolver<Float>::refactorize(int nnz, int *ii, int *jj, double *x, MatrixType type) {
+    // Convert input to CSC if necessary (same logic as constructor)
+    int *col_ptr, *rows;
+    double *data;
+    bool allocated = (type != MatrixType::CSC);
+
+    if (allocated) {
+        col_ptr = (int *) calloc(m_n + 1, sizeof(int));
+        rows    = (int *) malloc(nnz * sizeof(int));
+        data    = (double *) malloc(nnz * sizeof(double));
+    }
+
+    if (type == MatrixType::COO)
+        coo_to_csc(m_n, nnz, ii, jj, x, col_ptr, rows, data);
+    else if (type == MatrixType::CSR)
+        csr_to_csc(m_n, nnz, ii, jj, x, col_ptr, rows, data);
+    else {
+        col_ptr = ii;
+        rows    = jj;
+        data    = x;
+    }
+
+    // Deduplicate — same as in constructor
+    int local_nnz = nnz;
+    csc_sort_indices(m_n, local_nnz, col_ptr, rows, data);
+    csc_sum_duplicates(m_n, local_nnz, &col_ptr, &rows, &data);
+
+    // Build a fresh cholmod_sparse view of the new values
+    cholmod_sparse *A = cholmod_allocate_sparse(
+        m_n, m_n, local_nnz,
+        1, 1, -1, CHOLMOD_REAL, &m_common);
+
+    int    *A_colptr = (int *)    A->p;
+    int    *A_rows   = (int *)    A->i;
+    double *A_data   = (double *) A->x;
+    for (int j = 0; j < m_n; j++) {
+        A_colptr[j] = col_ptr[j];
+        for (int i = col_ptr[j]; i < col_ptr[j+1]; i++) {
+            A_rows[i] = rows[i];
+            A_data[i] = data[i];
+        }
+    }
+    A_colptr[m_n] = local_nnz;
+
+    // Reuse the existing symbolic factor — only redo the numerical step
+    cholmod_factorize(A, m_factor, &m_common);
+
+    if (m_common.status == CHOLMOD_NOT_POSDEF)
+        throw std::invalid_argument("Matrix is not positive definite!");
+
+    // If we are solving on the GPU we need to refresh the numerical data in
+    // the device arrays (the sparsity structure doesn't change, so we only
+    // need to re-upload the values, not redo the level-set analysis).
+    if (!m_cpu) {
+        cholmod_sparse *lower_csc = cholmod_factor_to_sparse(m_factor, &m_common);
+        cholmod_sparse *lower_csr = cholmod_transpose(lower_csc, 1, &m_common);
+
+        int n_entries = lower_csc->nzmax;
+
+        Float *csc_data_f, *csr_data_f;
+        if (std::is_same_v<Float, double>) {
+            csc_data_f = (Float *) lower_csc->x;
+            csr_data_f = (Float *) lower_csr->x;
+        } else {
+            csc_data_f = (Float *) malloc(n_entries * sizeof(Float));
+            csr_data_f = (Float *) malloc(n_entries * sizeof(Float));
+            double *csc_d = (double *) lower_csc->x;
+            double *csr_d = (double *) lower_csr->x;
+            for (int i = 0; i < n_entries; i++) {
+                csc_data_f[i] = (Float) csc_d[i];
+                csr_data_f[i] = (Float) csr_d[i];
+            }
+        }
+
+        // lower_csr->x is the data for the lower-triangular CSR solve
+        cuda_check(cuMemcpyAsync(m_lower_data_d, csr_data_f, n_entries * sizeof(Float), 0));
+        // lower_csc->x is the data for the upper-triangular CSR solve
+        // (upper = L^T, stored as CSC of L = CSR of L^T)
+        cuda_check(cuMemcpyAsync(m_upper_data_d, csc_data_f, n_entries * sizeof(Float), 0));
+
+        if (!std::is_same_v<Float, double>) {
+            free(csc_data_f);
+            free(csr_data_f);
+        }
+        cholmod_free_sparse(&lower_csc, &m_common);
+        cholmod_free_sparse(&lower_csr, &m_common);
+    }
+
+    cholmod_free_sparse(&A, &m_common);
+
+    if (allocated) {
+        free(col_ptr);
+        free(rows);
+        free(data);
+    }
+}
+
+template <typename Float>
 CholeskySolver<Float>::~CholeskySolver() {
-    if (m_cpu){
+    // m_factor and m_common are always kept alive now (both CPU and GPU paths),
+    // so always release them here.
+    if (m_tmp_chol) {
+        cholmod_free_dense(&m_tmp_chol, &m_common);
         cholmod_free_factor(&m_factor, &m_common);
         cholmod_finish(&m_common);
-    } else {
-        scoped_set_context guard(device_contexts[m_deviceID]);
+    }
+
+    if (!m_cpu) {
+        scoped_set_context guard(CUcontext);
 
         cuda_check(cuMemFree(m_processed_rows_d));
         cuda_check(cuMemFree(m_stack_id_d));

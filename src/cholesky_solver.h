@@ -45,6 +45,20 @@ public:
     // Solve the whole system using the Cholesky factorization on the CPU
     void solve_cpu(int n_rhs, Float *b, Float *x);
 
+    /**
+     * Refactorize: reuse the existing symbolic factorization (sparsity pattern,
+     * permutation, elimination tree) but recompute the numerical factors with
+     * new nonzero values.  The sparsity pattern must be identical to the one
+     * used when the solver was constructed.
+     *
+     * @param nnz   Number of nonzero entries (must equal the original nnz)
+     * @param ii    Row-index / column-pointer array (same format as constructor)
+     * @param jj    Column-index / row-pointer array (same format as constructor)
+     * @param x     New nonzero values
+     * @param type  Matrix representation (must be same type as constructor)
+     */
+    void refactorize(int nnz, int *ii, int *jj, double *x, MatrixType type);
+
     // Return whether the solver solves on the CPU or on the GPU
     bool is_cpu() { return m_cpu; };
     uint32_t get_deviceID() {return m_deviceID;}
@@ -69,7 +83,9 @@ private:
     // CPU or GPU solver?
     bool m_cpu;
 
-    // Pointers used for the analysis, freed if solving on the GPU, kept if solving on the CPU
+    // CHOLMOD factorization state — kept alive for the lifetime of the solver
+    // on both CPU and GPU paths so that refactorize() can reuse the symbolic
+    // factorization (permutation, elimination tree, sparsity pattern of L).
     cholmod_factor *m_factor;
     cholmod_dense  *m_tmp_chol = nullptr;
     cholmod_common  m_common;

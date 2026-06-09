@@ -111,7 +111,32 @@ void declare_cholesky(nb::module_ &m, const std::string &typestr, const char *do
         },
         nb::arg("b").noconvert(),
         nb::arg("x").noconvert(),
-        doc_solve);
+        doc_solve)
+        .def("refactorize", [](Class &self,
+                               nb::ndarray<int32_t, nb::shape<-1>, nb::c_contig> ii,
+                               nb::ndarray<int32_t, nb::shape<-1>, nb::c_contig> jj,
+                               nb::ndarray<double,  nb::shape<-1>, nb::c_contig> x,
+                               MatrixType type) {
+
+            if (ii.device_type() != nb::device::cpu::value ||
+                jj.device_type() != nb::device::cpu::value ||
+                x.device_type()  != nb::device::cpu::value)
+                throw std::invalid_argument("refactorize: all arrays must be on CPU.");
+
+            self.refactorize((int) x.shape(0),
+                             (int *) ii.data(),
+                             (int *) jj.data(),
+                             (double *) x.data(),
+                             type);
+        },
+        nb::arg("ii"),
+        nb::arg("jj"),
+        nb::arg("x"),
+        nb::arg("type"),
+        "Refactorize: reuse the symbolic factorization (sparsity pattern, "
+        "permutation, elimination tree) and recompute the numerical Cholesky "
+        "factors with new nonzero values.  The sparsity pattern must be "
+        "identical to the one used at construction time.");
 }
 
 NB_MODULE(_cholespy_core, m_) {
